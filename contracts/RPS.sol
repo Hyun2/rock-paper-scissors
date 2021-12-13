@@ -7,7 +7,8 @@ contract RPS {
     enum Hand {
         rock,
         paper,
-        scissors
+        scissors,
+        none
     }
 
     enum PlayerStatus {
@@ -28,6 +29,7 @@ contract RPS {
         address payable addr;
         uint256 betAmount;
         Hand hand;
+        bytes32 encHand;
         PlayerStatus status;
     }
 
@@ -50,7 +52,15 @@ contract RPS {
         _;
     }
 
-    function createRoom(Hand _hand)
+    event CreateRoomLog(
+        address addr,
+        uint256 betAmount,
+        uint8 hand,
+        uint8 status,
+        uint256 roomNum
+    );
+
+    function createRoom(Hand _hand, string memory password)
         public
         payable
         isValidHand(_hand)
@@ -60,13 +70,15 @@ contract RPS {
             originator: Player({
                 addr: payable(msg.sender),
                 betAmount: msg.value,
-                hand: _hand,
+                hand: Hand.none,
+                encHand: sha256(abi.encodePacked(_hand, password)),
                 status: PlayerStatus.PENDING
             }),
             taker: Player({
                 addr: payable(msg.sender),
                 betAmount: 0,
-                hand: Hand.rock,
+                hand: Hand.none,
+                encHand: sha256(abi.encodePacked(_hand, password)),
                 status: PlayerStatus.PENDING
             }),
             betAmount: msg.value,
@@ -74,17 +86,34 @@ contract RPS {
         });
         roomNum = roomLen;
         roomLen = roomLen + 1;
+        emit CreateRoomLog(
+            payable(msg.sender),
+            msg.value,
+            uint8(_hand),
+            uint8(PlayerStatus.PENDING),
+            roomNum
+        );
+
+        return roomNum;
     }
 
-    function joinRoom(uint256 roomNum, Hand _hand)
-        public
-        payable
-        isValidHand(_hand)
-    {
+    event JoinRoomLog(
+        uint256 roomNum,
+        uint8 hand,
+        uint8 status,
+        uint256 betAmount
+    );
+
+    function joinRoom(
+        uint256 roomNum,
+        Hand _hand,
+        string memory password
+    ) public payable isValidHand(_hand) {
         rooms[roomNum].taker = Player({
             addr: payable(msg.sender),
             betAmount: msg.value,
-            hand: _hand,
+            hand: Hand.none,
+            encHand: sha256(abi.encodePacked(_hand, password)),
             status: PlayerStatus.PENDING
         });
 
@@ -92,8 +121,59 @@ contract RPS {
             rooms[roomNum].originator.betAmount +
             msg.value;
 
-        compareHands(roomNum);
+        emit JoinRoomLog(
+            roomNum,
+            uint8(_hand),
+            uint8(rooms[roomNum].taker.status),
+            uint256(rooms[roomNum].betAmount)
+        );
     }
+
+    function revealOriginator(
+        uint256 roomNum,
+        Hand _hand,
+        string memory password
+    ) public {
+        if (
+            sha256(abi.encodePacked(_hand, password)) ==
+            rooms[roomNum].originator.encHand
+        ) {
+            rooms[roomNum].originator.hand = _hand;
+        }
+
+        if (
+            rooms[roomNum].originator.hand != Hand.none &&
+            rooms[roomNum].taker.hand != Hand.none
+        ) {
+            compareHands(roomNum);
+        }
+    }
+
+    function revealTaker(
+        uint256 roomNum,
+        Hand _hand,
+        string memory password
+    ) public {
+        if (
+            sha256(abi.encodePacked(_hand, password)) ==
+            rooms[roomNum].taker.encHand
+        ) {
+            rooms[roomNum].taker.hand = _hand;
+        }
+        if (
+            rooms[roomNum].originator.hand != Hand.none &&
+            rooms[roomNum].taker.hand != Hand.none
+        ) {
+            compareHands(roomNum);
+        }
+    }
+
+    event CompareHandsLog(
+        uint256 roomNum,
+        uint8 originatorHand,
+        uint8 takerHand,
+        uint8 roomStatus
+    );
 
     function compareHands(uint256 roomNum) private {
         uint8 originatorHand = uint8(rooms[roomNum].originator.hand);
@@ -115,6 +195,15 @@ contract RPS {
         } else {
             rooms[roomNum].status = GameStatus.ERROR;
         }
+
+        emit CompareHandsLog(
+            roomNum,
+            originatorHand,
+            takerHand,
+            uint8(rooms[roomNum].status)
+        );
+
+        payout(roomNum);
     }
 
     modifier isPlayer(uint256 roomNum, address sender) {
@@ -125,11 +214,9 @@ contract RPS {
         _;
     }
 
-    function payout(uint256 roomNum)
-        public
-        payable
-        isPlayer(roomNum, msg.sender)
-    {
+    event PayOutLog(string log);
+
+    function payout(uint256 roomNum) public payable {
         if (
             rooms[roomNum].originator.status == PlayerStatus.TIE &&
             rooms[roomNum].taker.status == PlayerStatus.TIE
@@ -139,11 +226,13 @@ contract RPS {
             );
             rooms[roomNum].taker.addr.transfer(rooms[roomNum].taker.betAmount);
         } else {
-            if (
-                rooms[roomNum].originator.status == PlayerStatus.WIN
-            ) {} else if (
-                rooms[roomNum].taker.status == PlayerStatus.WIN
-            ) {} else {
+            if (rooms[roomNum].originator.status == PlayerStatus.WIN) {
+                rooms[roomNum].originator.addr.transfer(
+                    rooms[roomNum].betAmount
+                );
+            } else if (rooms[roomNum].taker.status == PlayerStatus.WIN) {
+                rooms[roomNum].taker.addr.transfer(rooms[roomNum].betAmount);
+            } else {
                 rooms[roomNum].originator.addr.transfer(
                     rooms[roomNum].originator.betAmount
                 );
@@ -152,6 +241,7 @@ contract RPS {
                 );
             }
         }
-        rooms[roomNum].status = GameStatus.COMPLETE;
+        emit PayOutLog("Paid");
+        rooms[roomNum].status = GameStatus.COMPLETE; // 게임이 종료되었으므로 게임 상태 변경
     }
 }
